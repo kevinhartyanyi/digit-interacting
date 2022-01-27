@@ -218,155 +218,26 @@ class Model(nn.Module):
         return pts3d_cam
 
     def forward(self, inputs, targets, meta_info, mode):
-        loss_dict = {}
-
-        # unpacking
         input_img = inputs["img"]
-        target_joint_coord = targets["joint_coord"]
-        target_rel_root_depth = targets["rel_root_depth"]
-        target_hand_type = targets["hand_type"]
-        joint_valid = meta_info["joint_valid"]
-        root_valid = meta_info["root_valid"]
-        hand_type_valid = meta_info["hand_type_valid"]
-        inv_trans = meta_info["inv_trans"]
-        segm_target_256 = targets["segm_256"]
-        segm_valid = targets["segm_valid"]
 
-        pose_dict = self.pose_reg(input_img, segm_target_256, segm_valid)
+        pose_dict = self.pose_reg(input_img, None, None)
+
         hm_2d = pose_dict["hm_2d"]
-        hm_norm = pose_dict["hm_norm"]
         zval = pose_dict["zval"]
         rel_root_depth_out = pose_dict["rel_root_depth_out"]
-        hand_type = pose_dict["hand_type"]
         hand_type_sigmoid = pose_dict["hand_type_sigmoid"]
-        segm_dict = pose_dict["segm_dict"]
-        segm_dict["segm_256"] = segm_target_256
-        segm_dict["segm_valid"] = segm_valid
 
         joint_xy = hm_utils.hm2xy(hm_2d, self.args.output_hm_shape, self.args.beta)
 
         # 2p5 to 3d
         joint_xyz = torch.cat((joint_xy, zval[:, :, None]), dim=2)
-        focal = meta_info["focal"]
-        princpt = meta_info["princpt"]
-        abs_depth_left = meta_info["abs_depth_left"]
-        abs_depth_right = meta_info["abs_depth_right"]
-        hw_sizes = meta_info["hw_size"]
-        flipped = meta_info["flipped"]
 
-        kp_cam = self.convert_2p5_3d(
-            joint_xyz,
-            inv_trans,
-            abs_depth_left,
-            abs_depth_right,
-            focal,
-            princpt,
-            flipped,
-            hw_sizes,
-        )
-
-        gt_cam = self.convert_2p5_3d(
-            target_joint_coord,
-            inv_trans,
-            abs_depth_left,
-            abs_depth_right,
-            focal,
-            princpt,
-            flipped,
-            hw_sizes,
-        )
-
-        joint_mask = joint_valid
-        root_mask = root_valid
-        hand_type_mask = hand_type_valid
-
-        # Prior losses
-        left_bone_vector = (
-            joint_xyz[:, self.left_bones[:, 0]] - joint_xyz[:, self.left_bones[:, 1]]
-        )
-        right_bone_vector = (
-            joint_xyz[:, self.right_bones[:, 0]] - joint_xyz[:, self.right_bones[:, 1]]
-        )
-        gt_left_bone_vector = (
-            target_joint_coord[:, self.left_bones[:, 0]]
-            - target_joint_coord[:, self.left_bones[:, 1]]
-        )
-        gt_right_bone_vector = (
-            target_joint_coord[:, self.right_bones[:, 0]]
-            - target_joint_coord[:, self.right_bones[:, 1]]
-        )
-
-        left_bone_valid = (
-            joint_valid[:, self.left_bones[:, 0]]
-            * joint_valid[:, self.left_bones[:, 1]]
-        )
-        right_bone_valid = (
-            joint_valid[:, self.right_bones[:, 0]]
-            * joint_valid[:, self.right_bones[:, 1]]
-        )
-
-        left_err = (left_bone_vector - gt_left_bone_vector) ** 2
-        right_err = (right_bone_vector - gt_right_bone_vector) ** 2
-
-        left_err = (left_err * left_bone_valid[:, :, None]).mean()
-        right_err = (right_err * right_bone_valid[:, :, None]).mean()
-
-        # FS losses
-        loss_dict["loss_rel_root_depth"] = self.rel_root_depth_loss(
-            rel_root_depth_out, target_rel_root_depth, root_mask
-        )
-        loss_dict["loss_hand_type"] = self.hand_type_loss(
-            hand_type, target_hand_type, hand_type_mask
-        )
-        loss_dict["loss_joint"] = self.joint_l1loss(
-            joint_xyz, target_joint_coord, joint_mask
-        ).mean()
-        loss_dict["loss_segm"] = self.segm_loss(segm_dict) * 10.0
-        loss_dict["loss_bone"] = 0.1 * (left_err + right_err)
-
-        if mode == "train":
-            return loss_dict
-
-        if mode == "vis":
-            vis_dict = {}
-            segm_l_mask_128 = (
-                F.interpolate(
-                    segm_dict["segm_mask"].float()[:, None, :, :], 256, mode="nearest"
-                )
-                .long()
-                .squeeze()
-            )
-            segm_r_mask_128 = segm_l_mask_128.clone()
-            vis_dict["segm_l_mask"] = torch_utils.tensor2np(segm_l_mask_128)
-            vis_dict["segm_r_mask"] = torch_utils.tensor2np(segm_r_mask_128)
-            vis_dict["input_img"] = torch_utils.tensor2np(input_img)
-            vis_dict["segm_target_256"] = torch_utils.tensor2np(
-                F.interpolate(segm_target_256.float(), 256, mode="nearest").long()
-            )
-            vis_dict["gt_joint_2p5"] = torch_utils.tensor2np(target_joint_coord)
-            vis_dict["joint_valid"] = torch_utils.tensor2np(joint_valid)
-            vis_dict["im_path"] = meta_info["im_path"]
-            vis_dict["pred_joint_2p5"] = torch_utils.tensor2np(joint_xyz)
-            vis_dict["hm_2d"] = torch_utils.tensor2np(hm_2d)
-            vis_dict["segm_valid"] = torch_utils.tensor2np(segm_valid)
-
-            vis_dict["pred_cam"] = torch_utils.tensor2np(kp_cam)
-            vis_dict["gt_cam"] = torch_utils.tensor2np(gt_cam)
-            vis_dict["hm_norm"] = torch_utils.tensor2np(hm_norm)
-            return vis_dict
-
-        loss_dict = {k: loss_dict[k].mean() for k in loss_dict}
-        loss_dict["total_loss"] = sum(loss_dict[k] for k in loss_dict)
-
-        # test
         out_dict = {
             "joint_coord": joint_xyz,
             "rel_root_depth": rel_root_depth_out,
             "hand_type": hand_type_sigmoid,
-            "inv_trans": inv_trans,
-            "idx": meta_info["idx"],
         }
-        return out_dict, loss_dict
+        return out_dict
 
 
 def get_model_pl(args):

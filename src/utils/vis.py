@@ -84,7 +84,7 @@ def vis_keypoints(
         score_thr=0.4, line_width=2, circle_rad=2, vis_dir=None):
     
     rgb_dict = get_keypoint_rgb(skeleton)
-    _img = img
+    _img = Image.fromarray(img.transpose(1,2,0).astype('uint8')) 
     draw = ImageDraw.Draw(_img)
     for i in range(len(skeleton)):
         joint_name = skeleton[i]['name']
